@@ -9,33 +9,28 @@ calendar_callback = CallbackData('simple_calendar', 'action', 'year', 'month', '
 
 class SimpleCalendar:
     MONTHS = [
-        'Январь',
-        'Февраль',
-        'Март',
-        'Апрель',
-        'Май',
-        'Июнь',
-        'Июль',
-        'Август',
-        'Сентябрь',
-        'Октябрь',
-        'Ноябрь',
-        'Декабрь',
-    ]
+    "January", "February", "March", "April",
+    "May", "June", "July", "August",
+    "September", "October", "November", "December"
+]
 
     async def start_calendar(self,
                              year: int = datetime.now().year,
                              month: int = datetime.now().month) -> InlineKeyboardMarkup:
-        """Создает клавиатуру с указанным годом и месяцем
+        """
+        Create an inline calendar keyboard.
 
-        :param year: год, для использования в календаре, если None, то используется текущий год
-        :param month: месяц, для использования в календаре, если None, то используется текущий месяц
-        :return: InlineKeyboardMarkup объект с календарем
+        Args:
+            year: Year to display.
+            month: Month to display (1-12).
+
+        Returns:
+            InlineKeyboardMarkup containing the calendar.
         """
         inline_kb = InlineKeyboardMarkup(row_width=7)
         ignore_callback = calendar_callback.new('IGNORE', year, month, 0)
 
-        """Первая строка - месяц и год"""
+        # Calendar header: month and year
         inline_kb.row()
         inline_kb.insert(InlineKeyboardButton(
             '<<',
@@ -51,15 +46,15 @@ class SimpleCalendar:
             callback_data=calendar_callback.new('NEXT-YEAR', year, month, 1)
         ))
 
-        """Вторая строка - дни недели"""
+        # Weekday labels
         inline_kb.row()
 
-        week_days = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс']
+        week_days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
         for day in week_days:
             inline_kb.insert(InlineKeyboardButton(day, callback_data=ignore_callback))
 
-        """Основные строки - дни месяца"""
+        # Calendar days
         month_calendar = calendar.monthcalendar(year, month)
 
         """
@@ -80,7 +75,7 @@ class SimpleCalendar:
                     callback_data=calendar_callback.new('DAY', year, month, day)
                 ))
 
-        """Последняя строка - кнопки предыдущего и следующего месяца"""
+        # Navigation buttons for previous and next month
         inline_kb.row()
         inline_kb.insert(InlineKeyboardButton(
             '<',
@@ -96,49 +91,53 @@ class SimpleCalendar:
         return inline_kb
 
     async def process_selection(self, query: CallbackQuery, data: CallbackData):
-        """Обработка callback_query. Этот метод создает новый календарь при нажатии на кнопки "вперед" или назад.
-        Этот метод нужно вызывать внутри CallbackQueryHandler
+        """
+        Process a calendar button click.
 
-        :param query: callback_query, как это предусмотрено в CallbackQueryHandler
-        :param data: callback_data это словарь созданный с помощью calendar_callback
-        :return: Кортеж с датой, если дата была выбрана
+        Args:
+            query: Telegram callback query.
+            data: Parsed calendar callback data.
+
+        Returns:
+            A tuple containing the selection status and selected date.
         """
 
         return_data = (False, None)
         temp_date = datetime(int(data['year']), int(data['month']), 1)
 
-        """Обработка пустых кнопок"""
+        # Handle disabled calendar buttons
         if data['action'] == 'IGNORE':
             await query.answer(cache_time=60)
 
-        """Обработка нажатия на день"""
+        # Handle day selection
         if data['action'] == 'DAY':
+            await query.answer()
             await query.message.delete_reply_markup()
             year = int(data['year'])
             month = int(data['month'])
             day = int(data['day'])
             return_data = True, datetime(year, month, day)
 
-        """Обработка нажатия на кнопку СЛЕДУЮЩЕГО года"""
+        # Navigate to the next year
         if data['action'] == 'NEXT-YEAR':
             next_date = datetime(int(data['year']) + 1, int(data['month']), 1)
             year = int(next_date.year)
             month = int(next_date.month)
             await query.message.edit_reply_markup(await self.start_calendar(year, month))
 
-        """Обработка нажатия на кнопку ПРЕДЫДУЩЕГО года"""
+        # Navigate to the previous year
         if data['action'] == 'PREV-YEAR':
             prev_date = datetime(int(data['year']) - 1, int(data['month']), 1)
             year = int(prev_date.year)
             month = int(prev_date.month)
             await query.message.edit_reply_markup(await self.start_calendar(year, month))
 
-        """Обработка нажатия на кнопку СЛЕДУЮЩЕГО месяца"""
+        # Navigate to the next month
         if data['action'] == 'NEXT-MONTH':
             next_date = temp_date + timedelta(days=31)
             await query.message.edit_reply_markup(await self.start_calendar(next_date.year, next_date.month))
 
-        """Обработка нажатия на кнопку ПРЕДЫДУЩЕГО месяца"""
+        # Navigate to the previous month
         if data['action'] == 'PREV-MONTH':
             prev_date = temp_date - timedelta(days=1)
             await query.message.edit_reply_markup(await self.start_calendar(prev_date.year, prev_date.month))

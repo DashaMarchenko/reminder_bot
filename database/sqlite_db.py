@@ -1,17 +1,25 @@
+
 import logging
-import os.path
 import sqlite3
 import uuid
-from datetime import datetime, timedelta
-from pprint import pprint
-from typing import Union, NamedTuple
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import NamedTuple
+from contextlib import contextmanager, closing
 
 from config import load_config
 
-config = load_config(r'Z:\Pt9_01\DashaMarchenko\RemainderBot\config\config.ini')
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+DB_PATH = BASE_DIR / "users.db"
+LOG_PATH = BASE_DIR / "logs" / "bot_db_log.log"
+CONFIG_PATH = BASE_DIR / "config" / "config.ini"
+
+config = load_config(str(CONFIG_PATH))
 
 
 class Remind(NamedTuple):
+    id: str
     user_id: int
     name: str
     text: str
@@ -19,179 +27,213 @@ class Remind(NamedTuple):
 
 class SQLiteDB:
     def __init__(self):
-        self.connection = sqlite3.connect(r'users.db', check_same_thread=False)
-        self.cursor = self.connection.cursor()
-        self._create_table_users()
-
-        if not os.path.exists('logs'):
-            os.makedirs('logs')
-
+        self.db_path = DB_PATH
         self.logger = self._setup_logger()
+        self._create_table_users()
+        self._create_table_settings()
 
     @staticmethod
     def _setup_logger():
-        logger = logging.getLogger('bot_db_log')
+        LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+        logger = logging.getLogger("bot_db_log")
         logger.setLevel(logging.INFO)
 
-        log_file = os.path.join(os.path.abspath(os.curdir), fr'logs/bot_db_log.log')
-        file_handler = logging.FileHandler(log_file)
-        file_handler.setLevel(logging.INFO)
-
-        formatter = logging.Formatter('%(asctime)s - %(Levelname)s - %(message)s')
-        file_handler.setFormatter(formatter)
-
-        logger.addHandler(file_handler)
+        if not logger.handlers:
+            handler = logging.FileHandler(LOG_PATH, encoding="utf-8")
+            handler.setFormatter(
+                logging.Formatter(
+                    "%(asctime)s - %(levelname)s - %(message)s"
+                )
+            )
+            logger.addHandler(handler)
 
         return logger
 
+    @contextmanager
+    def _connect(self):
+        with closing(sqlite3.connect(self.db_path, timeout=10)) as connection:
+            with connection:
+                yield connection
+
     def _create_table_users(self):
-        """Создает таблицу напоминаний
+        """Create the reminders table if it does not exist."""
+        with self._connect() as connection:
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS users (
+                    id TEXT PRIMARY KEY,
+                    user_id INTEGER,
+                    name TEXT,
+                    date TEXT,
+                    text TEXT
+                )
+                """
+            )
 
-        :return:
-        """
-        with self.connection:
-            self.cursor.execute("CREATE TABLE IF NOT EXISTS users"
-                                "("
-                                "id TEXT UNIQUE,"
-                                "user_id INTEGER,"
-                                "name TEXT,"
-                                "date TEXT,"
-                                "text TEXT"
-                                ")")
-            logging.info('Create table users')
+        self.logger.info("Reminders table initialized")
 
-    def insert_one_value(self, user_id: int, name: str, date: str, text: str, _id=None) -> Union[bool, int, tuple]:
-        """Вставка напоминания в БД
 
-        :param user_id: id пользователя в телеграм
-        :param name: имя пользователя в телеграм
-        :param date: дата, в которую должно прийти напоминание
-        :param text: текст напоминания
-        :param _id: уникальный id записи в БД
-        :return: bool, status code, ответ в виде текста или обновления
-        """
+    def _create_table_settings(self):
+        """Create a table for user preferences."""
+        with self._connect() as connection:
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS user_settings (
+                    user_id INTEGER PRIMARY KEY,
+                    timezone TEXT NOT NULL DEFAULT 'Europe/Vienna'
+                )
+                """
+            )
+
+
+    def set_user_timezone(self, user_id: int, timezone_name: str):
+        """Save or update a user's timezone."""
+        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
         try:
-            if not _id:
-                value = (str(uuid.uuid4()), user_id, name, date, text)
-            else:
-                value = (user_id, name, date, text)
-            if not self._check_duplicates(value):
-                with self.connection:
-                    self.cursor.execute(
-                        "INSERT INTO users (id, user_id, name, date, text) VALUES (?, ?, ?, ?, ?)", value
-                    )
-                    return True, 200, value
-            else:
-                return False, 404, value
+            ZoneInfo(timezone_name)
+        except (ZoneInfoNotFoundError, TypeError, ValueError):
+            return False
 
-        except Exception as ex:
-            self.logger.error(f'{repr(ex)}')
-            return False, 404, f'{repr(ex)}'
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO user_settings (user_id, timezone)
+                VALUES (?, ?)
+                ON CONFLICT(user_id)
+                DO UPDATE SET timezone = excluded.timezone
+                """,
+                (user_id, timezone_name)
+            )
 
-    def _check_duplicates(self, value: tuple) -> bool:
-        """Проверка на дубликаты
+        return True
 
-        :param value: кортеж значений
-        :return: bool
-        """
-        with self.connection:
-            all_data = self.cursor.execute("SELECT user_id, name, date, text FROM users")
-            for remind in all_data.fetchall():
-                if remind == value[1:]:
-                    return True
+
+    def get_user_timezone(self, user_id: int):
+        """Retrieve a user's timezone."""
+        with self._connect() as connection:
+            result = connection.execute(
+                """
+                SELECT timezone
+                FROM user_settings
+                WHERE user_id = ?
+                """,
+                (user_id,)
+            ).fetchone()
+
+        return result[0] if result else "Europe/Vienna"
+
+
+    def insert_one_value(
+        self,
+        user_id: int,
+        name: str,
+        date: str,
+        text: str,
+        _id=None
+    ):
+        """Insert a reminder into the database."""
+        reminder_id = _id if _id is not None else str(uuid.uuid4())
+        values = (reminder_id, user_id, name, date, text)
+
+        try:
+            with self._connect() as connection:
+                connection.execute(
+                    """
+                    INSERT INTO users (id, user_id, name, date, text)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    values
+                )
+
+            self.logger.info("Reminder %s created", reminder_id)
+            return True, 200, values
+
+        except sqlite3.IntegrityError:
+            self.logger.warning("Reminder ID already exists: %s", reminder_id)
+            return False, 409, "Reminder ID already exists"
+
+        except sqlite3.Error:
+            self.logger.exception("Failed to create reminder")
+            return False, 500, "Database error"
 
     def get_all_values_json(self):
-        """Получение всех значений из базы данных
-
-        :return:
-        """
+        """Return all reminders as a dictionary."""
         try:
-            with self.connection:
-                all_data = self.cursor.execute("SELECT * FROM users")
-                all_posts = self._get_formatted_json(all_data.fetchall())
-                return all_posts, 200
-        except Exception as ex:
-            self.logger.error(f'{repr(ex)}')
-            return repr(ex), 404
+            with self._connect() as connection:
+                rows = connection.execute(
+                    "SELECT id, user_id, name, date, text FROM users"
+                ).fetchall()
 
-    def _get_formatted_json(self, users: Union[list, tuple]):
-        """Возвращает данные в формате JSON
+            return self._get_formatted_json(rows), 200
 
-        :param users: все пользовательские записи в БД
-        :return: JSON объект всех записей из БД
-        """
-        all_posts = dict()
-        for user in users:
-            _id = user[0]
-            user_id = user[1]
-            name = user[2]
-            date = user[3]
-            text = user[4]
-            all_posts[_id] = {
-                'user_id': user_id,
-                'name': name,
-                'date': date,
-                'text': text
+        except sqlite3.Error:
+            self.logger.exception("Failed to retrieve reminders")
+            return "Database error", 500
+
+    @staticmethod
+    def _get_formatted_json(rows):
+        """Convert reminder records to a dictionary."""
+        return {
+            reminder_id: {
+                "user_id": user_id,
+                "name": name,
+                "date": date,
+                "text": text
             }
-        return all_posts
+            for reminder_id, user_id, name, date, text in rows
+        }
 
     def delete_all_values(self):
-        """Удаление всех значений из базы данных
+        """Delete all reminders."""
+        try:
+            with self._connect() as connection:
+                connection.execute("DELETE FROM users")
 
-        :return: сообщение об успехе или об ошибке, status code
-        """
-        with self.connection:
-            try:
-                self.cursor.execute('DELETE FROM users')
-                return 'Все значения удалены', 200
-            except Exception as ex:
-                self.logger.error(f'{repr(ex)}')
-                return repr(ex), 404
+            self.logger.info("All reminders deleted")
+            return "All reminders deleted", 200
+
+        except sqlite3.Error:
+            self.logger.exception("Failed to delete reminders")
+            return "Database error", 500
+
 
     def send_remind(self):
-        """Отправка напоминания
+        """Retrieve all due reminders using UTC timestamps."""
+        now = datetime.now(timezone.utc).isoformat()
 
-        :return: user_id, name, text
-        """
-        with self.connection:
-            time_direction = config.tg_bot.TIME_DIRECTION
-            now = datetime.now() + timedelta(hours=time_direction)
-            now_date = now.strftime('%H:%M - %d.%m.%Y')
-            result = self.cursor.execute("SELECT * FROM users WHERE date = ?", (now_date,))
+        try:
+            with self._connect() as connection:
+                rows = connection.execute(
+                    """
+                    SELECT id, user_id, name, text
+                    FROM users
+                    WHERE date <= ?
+                    ORDER BY date ASC
+                    """,
+                    (now,)
+                ).fetchall()
 
-            all_data = result.fetchall()
-            if all_data:
-                all_id = tuple(
-                    [_id[0] for _id in all_data]
+            return [Remind(*row) for row in rows]
+
+        except sqlite3.Error:
+            self.logger.exception("Failed to retrieve due reminders")
+            return []
+
+
+    def delete_reminder(self, reminder_id: str):
+        """Delete a reminder after successful delivery."""
+        try:
+            with self._connect() as connection:
+                connection.execute(
+                    "DELETE FROM users WHERE id = ?",
+                    (reminder_id,)
                 )
-                self._delete_values(all_id)
-                for value in all_data:
-                    user_id = value[1]
-                    name = value[2]
-                    text = value[-1]
-                    yield Remind(user_id, name, text)
-            else:
-                return
 
-    def _delete_values(self, all_id: tuple):
-        """Удаление значений по id
+            self.logger.info("Reminder %s deleted", reminder_id)
+            return True
 
-        :param all_id: кортеж с id
-        :return:
-        """
-        with self.connection:
-            for _id in all_id:
-                self.cursor.execute("DELETE FROM users WHERE id = ?", (_id,))
-
-    def delete_db(self, db_file: str):
-        """
-        Удаляет базу данных
-
-        :param db_file: путь к файлу базы данных
-        :return:
-        """
-        if os.path.exists(db_file):
-            os.remove(db_file)
-            self.logger.warning('The database file has been removed')
-        else:
-            self.logger.warning('Database file not exists')
+        except sqlite3.Error:
+            self.logger.exception("Failed to delete reminder")
+            return False

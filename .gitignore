@@ -1,0 +1,29 @@
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# IDE
+.idea/
+.vs/
+.vscode/
+
+# Configuration and secrets
+config/config.ini
+.env
+.env.*
+
+# Database
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+
+# Logs
+logs/
+*.log
+
+# Temporary files
+*.tmp

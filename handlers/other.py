@@ -1,3 +1,4 @@
+
 import logging
 
 from aiogram import types, Dispatcher
@@ -8,15 +9,31 @@ from buttons import start_kb
 
 
 async def cancel(message: types.Message, state: FSMContext):
+    """Cancel the current conversation state."""
     current_state = await state.get_state()
+
     if current_state is None:
         return
 
-    logging.info(f'Cancelling state {current_state}')
-    await message.reply('Ввод отменен', reply_markup=start_kb)
+    logging.info("Cancelling state %s", current_state)
+
     await state.finish()
+    await message.reply(
+        "Action cancelled.",
+        reply_markup=start_kb
+    )
 
 
 def other_register_handlers(dp: Dispatcher):
-    dp.register_message_handler(cancel, state='*', commands=['отмена', 'cancel'])
-    dp.register_message_handler(cancel, Text(equals='отмена', ignore_case=True), state='*')
+    """Register cancellation handlers."""
+    dp.register_message_handler(
+        cancel,
+        commands=["cancel"],
+        state="*"
+    )
+
+    dp.register_message_handler(
+        cancel,
+        Text(equals="Cancel", ignore_case=True),
+        state="*"
+    )

@@ -1,8 +1,20 @@
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardButton, InlineKeyboardMarkup
 
-start_kb = ReplyKeyboardMarkup(resize_keyboard=True).add('Добавить напоминание')
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 
-cancel_kb = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True).row(KeyboardButton('Отмена'))
+start_kb = ReplyKeyboardMarkup(
+    resize_keyboard=True
+).add("Add reminder")
 
-choice_kb = ReplyKeyboardMarkup(resize_keyboard=True).row(KeyboardButton('Да'), KeyboardButton('Нет')).row(
-    KeyboardButton('Отмена'))
+cancel_kb = ReplyKeyboardMarkup(
+    resize_keyboard=True,
+    one_time_keyboard=True
+).add("Cancel")
+
+choice_kb = ReplyKeyboardMarkup(
+    resize_keyboard=True
+).row(
+    KeyboardButton("Yes"),
+    KeyboardButton("No")
+).row(
+    KeyboardButton("Cancel")
+)

@@ -1,132 +1,276 @@
-from datetime import datetime
+
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from aiogram import types, Dispatcher
 from aiogram.dispatcher import FSMContext
 from aiogram.dispatcher.filters import Text
 from aiogram.dispatcher.filters.state import StatesGroup, State
 from aiogram.types import CallbackQuery
-from aiogram.utils.callback_data import CallbackData
 
-from app.main import bot, DB
+from bot_config import DB
 from buttons import start_kb, cancel_kb, choice_kb
 from calendars import simple_calendar_callback, SimpleCalendar
 
 
-class FSMAdmin(StatesGroup):
-    send_info = State()
-    get_date = State()
-    get_text = State()
-    confirmation = State()
-    finish = State()
+VIENNA_TZ = ZoneInfo("Europe/Vienna")
+
+
+def localize_time(naive_datetime: datetime, timezone_name: str) -> datetime:
+    """Validate a local time, including DST transitions."""
+    tz = ZoneInfo(timezone_name)
+    candidates = []
+
+    for fold in (0, 1):
+        local_dt = naive_datetime.replace(tzinfo=tz, fold=fold)
+
+        round_trip = (
+            local_dt.astimezone(timezone.utc)
+            .astimezone(tz)
+        )
+
+        if round_trip.replace(tzinfo=None) == naive_datetime:
+            candidates.append(local_dt)
+
+    if not candidates:
+        raise ValueError("This local time does not exist.")
+
+    if candidates[0].utcoffset() != candidates[-1].utcoffset():
+        raise ValueError("This local time is ambiguous.")
+
+    return candidates[0]
+
+
+def localize_vienna_time(naive_datetime: datetime) -> datetime:
+    """Validate Vienna local time for backward compatibility."""
+    return localize_time(naive_datetime, "Europe/Vienna")
+
+
+class ReminderState(StatesGroup):
+    choosing_date = State()
+    entering_time = State()
+    entering_text = State()
+    confirming = State()
 
 
 async def start_mess(message: types.Message):
-    await message.answer(f'Привет, {message.from_user.first_name}, я бот, который может '
-                         f'напомнить о важных событиях', reply_markup=start_kb)
+    """Welcome the user."""
+    await message.answer(
+        f"Hi, {message.from_user.first_name}! "
+        "I can remind you about important events.",
+        reply_markup=start_kb
+    )
 
 
 async def send_calendar(message: types.Message, state: FSMContext):
-    await message.answer('Выбери дату напоминания', reply_markup=await SimpleCalendar().start_calendar())
-    await state.set_state(FSMAdmin.send_info.state)
+    """Display a calendar for selecting a reminder date."""
+    await state.finish()
+
+    await message.answer(
+        "Choose the date for your reminder:",
+        reply_markup=await SimpleCalendar().start_calendar()
+    )
+
+    await ReminderState.choosing_date.set()
 
 
-async def send_question(callback_query: CallbackQuery, callback_data: CallbackData, state: FSMContext):
-    selected, date = await SimpleCalendar().process_selection(callback_query, callback_data)
+async def send_question(
+    callback_query: CallbackQuery,
+    callback_data: dict,
+    state: FSMContext
+):
+    """Process the selected date and ask for a time."""
+    selected, date = await SimpleCalendar().process_selection(
+        callback_query, callback_data
+    )
 
-    now_date = datetime.now().date()
-    user_date = datetime.strptime(f'{date}', '%Y-%m-%d %H:%M:%S').date()
-
-    if now_date > user_date:
-        await bot.send_message(callback_query.from_user.id, 'Ошибка ввода. Введенная дата уже прошла',
-                               reply_markup=start_kb)
+    if not selected:
         return
 
-    if selected:
-        async with state.proxy() as data:
-            data['date'] = date.strftime('%d.%m.%Y')
+    user_timezone = DB.get_user_timezone(callback_query.from_user.id)
+    user_tz = ZoneInfo(user_timezone)
 
-        await bot.send_message(callback_query.from_user.id, f'Введите время напоминания в формате '
-                                                            f'<b>ЧЧ:ММ</b> \nНапример: <b>08:52</b>',
-                               parse_mode=types.ParseMode.HTML, reply_markup=cancel_kb)
-        await state.set_state(FSMAdmin.get_date.state)
-    else:
+    if date.date() < datetime.now(user_tz).date():
+        await callback_query.message.answer(
+            "This date is in the past. Please choose another date."
+        )
         return
+
+    async with state.proxy() as data:
+        data["date"] = date.strftime("%d.%m.%Y")
+
+    await callback_query.message.answer(
+        "Enter the reminder time in HH:MM format.\n"
+        "Example: 08:52",
+        reply_markup=cancel_kb
+    )
+
+    await ReminderState.entering_time.set()
+
 
 
 async def get_info(message: types.Message, state: FSMContext):
+    """Validate the user's local time and convert it to UTC."""
+    data = await state.get_data()
+    selected_date = data.get("date")
+
+    user_timezone = DB.get_user_timezone(message.from_user.id)
+    user_tz = ZoneInfo(user_timezone)
+
     try:
-        if message.text == 'Отмена':
-            await state.finish()
-            await message.reply('Ввод отменен', reply_markup=types.ReplyKeyboardRemove())
-        else:
-            info = await state.get_data()
-            date = info.get('date')
-            all_date = f'{message.text} - {date}'
+        # Combine the selected date and entered time.
+        naive_datetime = datetime.strptime(
+            f"{selected_date} {message.text.strip()}",
+            "%d.%m.%Y %H:%M"
+        )
 
-            now_date = datetime.now()
-            user_date = datetime.strptime(f'{all_date}', '%H:%M - %d.%m.%Y')
+    except (ValueError, AttributeError, TypeError):
+        await message.answer(
+            "Invalid time format. Please use HH:MM.\n"
+            "Example: 14:30",
+            reply_markup=cancel_kb
+        )
+        return
 
-            if now_date >= user_date:
-                await message.answer('Ошибка ввода. Введенная дата уже прошла', reply_markup=start_kb)
-                await state.finish()
-            else:
-                async with state.proxy() as data:
-                    data['all_date'] = all_date
+    try:
+        # Validate the local time, including DST transitions.
+        local_datetime = localize_time(
+            naive_datetime,
+            user_timezone
+        )
 
-                    await message.answer('Введите текст напоминания', reply_markup=cancel_kb)
-                    await FSMAdmin.get_text.set()
     except ValueError:
-        await message.answer('Неправильный формат даты\n'
-                             'Проверьте правильность введенных данных и введите время снова',
-                             reply_markup=cancel_kb)
-        await FSMAdmin.get_date.set()
+        await message.answer(
+            "This time is invalid or ambiguous due to "
+            "daylight saving time changes. "
+            "Please choose another time.",
+            reply_markup=cancel_kb
+        )
+        return
+
+    if local_datetime <= datetime.now(user_tz):
+        await message.answer(
+            "This date and time are in the past. "
+            "Please enter a future time.",
+            reply_markup=cancel_kb
+        )
+        return
+
+    # Convert the selected local time to UTC.
+    utc_datetime = local_datetime.astimezone(timezone.utc)
+
+    async with state.proxy() as data:
+        data["all_date"] = utc_datetime.isoformat()
+        data["display_date"] = local_datetime.strftime(
+            "%d.%m.%Y %H:%M"
+        )
+        data["timezone"] = user_timezone
+
+    await message.answer(
+        "Enter the reminder text:",
+        reply_markup=cancel_kb
+    )
+
+    await ReminderState.entering_text.set()
+
 
 
 async def get_text(message: types.Message, state: FSMContext):
+    """Store the reminder text and request confirmation."""
+    if not message.text or not message.text.strip():
+        await message.answer(
+            "Please enter a non-empty reminder."
+        )
+        return
+
     async with state.proxy() as data:
-        data['text'] = message.text
+        data["text"] = message.text.strip()
 
     data = await state.get_data()
-    date = data.get('all_date')
-    text = data.get('text')
 
-    await message.answer(f'Все верно?\n'
-                         f'{date}\n{text}', reply_markup=choice_kb)
-    await FSMAdmin.finish.set()
+    await message.answer(
+        "Is everything correct?\n\n"
+        f"Date: {data['display_date']} ({data['timezone']})\n"
+        f"Reminder: {data['text']}",
+        reply_markup=choice_kb
+    )
+
+    await ReminderState.confirming.set()
 
 
 async def save_info(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    date = data.get('all_date')
-    text = data.get('text')
+    """Save the confirmed reminder to the database."""
+    answer = message.text.strip().lower()
 
-    user_id = message.from_user.id
-    name = message.from_user.first_name
-
-    if message.text == 'Да':
-        if DB.insert_one_value(user_id, name, date, text)[0]:
-            await message.answer('Ваши данные успешно сохранены',
-                                 reply_markup=types.ReplyKeyboardRemove())
-            await state.finish()
-        else:
-            await message.answer('Ваши данные не сохранены',
-                                 reply_markup=types.ReplyKeyboardRemove())
-            await state.finish()
-    elif message.text == 'Нет':
-        await message.reply('Ввод отменен', reply_markup=types.ReplyKeyboardRemove())
+    if answer == "no":
         await state.finish()
+        await message.answer(
+            "Reminder cancelled.",
+            reply_markup=start_kb
+        )
+        return
+
+    if answer != "yes":
+        await message.answer(
+            "Please select Yes, No, or Cancel.",
+            reply_markup=choice_kb
+        )
+        return
+
+    data = await state.get_data()
+
+    result = DB.insert_one_value(
+        user_id=message.from_user.id,
+        name=message.from_user.first_name,
+        date=data["all_date"],
+        text=data["text"]
+    )
+
+    await state.finish()
+
+    if result[0]:
+        await message.answer(
+            "Reminder saved successfully!",
+            reply_markup=start_kb
+        )
+    else:
+        await message.answer(
+            "Failed to save the reminder. Please try again.",
+            reply_markup=start_kb
+        )
 
 
 def remind_register_handlers(dp: Dispatcher):
-    """Функция для регистрации хэндлеров
+    """Register reminder conversation handlers."""
+    dp.register_message_handler(
+        start_mess,
+        commands=["start"],
+        state="*"
+    )
 
-    :param dp:
-    :return:
-    """
-    dp.register_message_handler(start_mess, commands=['start'])
-    dp.register_callback_query_handler(send_question, simple_calendar_callback.filter(), state=FSMAdmin.send_info)
-    dp.register_message_handler(send_calendar, Text(equals='Добавить напоминание', ignore_case=True), state='*')
-    dp.register_message_handler(get_info, state=FSMAdmin.get_date)
+    dp.register_message_handler(
+        send_calendar,
+        Text(equals="Add reminder", ignore_case=True),
+        state="*"
+    )
 
-    dp.register_message_handler(get_text, state=FSMAdmin.get_text)
-    dp.register_message_handler(save_info, state=FSMAdmin.finish)
+    dp.register_callback_query_handler(
+        send_question,
+        simple_calendar_callback.filter(),
+        state=ReminderState.choosing_date
+    )
+
+    dp.register_message_handler(
+        get_info,
+        state=ReminderState.entering_time
+    )
+
+    dp.register_message_handler(
+        get_text,
+        state=ReminderState.entering_text
+    )
+
+    dp.register_message_handler(
+        save_info,
+        state=ReminderState.confirming
+    )

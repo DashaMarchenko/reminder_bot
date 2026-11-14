@@ -1,42 +1,40 @@
-import json
+
 import unittest
 
-from  fastapi.testclient import TestClient
+from fastapi.testclient import TestClient
 
 from app.main import app, WEBHOOK_PATH
 
 
 class TestApp(unittest.TestCase):
 
-    def setUp(self) -> None:
+    def setUp(self):
         self.client = TestClient(app)
 
     def test_home(self):
-        response = self.client.get('/')
+        response = self.client.get("/")
+
         self.assertEqual(response.status_code, 200)
-        self.assertIsInstance(response.text, str)
-        self.assertEqual(response.text, '"Бот запущен"')
+        self.assertEqual(response.json(), "Bot is running")
 
-    def test_info(self):
-        response = self.client.get(f'{WEBHOOK_PATH}/info')
-        self.assertEqual(response.status_code, 200)
-        response_data = json.loads(response.content)
-        self.assertIsInstance(response_data, dict)
+    def test_info_endpoint_removed(self):
+        response = self.client.get(f"{WEBHOOK_PATH}/info")
 
-    def test_add_remind(self):
-        remind = {
-            'user_id': 1,
-            'name': "Test",
-            'date': '2024-01-01 00:00:00',
-            'text': 'Test Reminder'
-        }
-        response = self.client.post(f'{WEBHOOK_PATH}/post', json=remind)
-        self.assertEqual(response.status_code, 201)
-        response_data = json.loads(response.content)
-        self.assertIsInstance(response_data, list)
-        self.assertIn(remind['user_id'], response_data)
-        self.assertEqual(response_data[1], remind['user_id'])
+        self.assertEqual(response.status_code, 404)
+
+    def test_clear_endpoint_removed(self):
+        response = self.client.get(f"{WEBHOOK_PATH}/clear")
+
+        self.assertEqual(response.status_code, 404)
+
+    def test_post_endpoint_removed(self):
+        response = self.client.post(
+            f"{WEBHOOK_PATH}/post/",
+            json={"text": "Test reminder"}
+        )
+
+        self.assertEqual(response.status_code, 404)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()
